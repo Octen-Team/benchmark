@@ -195,13 +195,3 @@ Streaming JSONL writes (ordered by query_id)
 | Perplexity | `PERPLEXITY_API_KEY` | POST | No |
 
 ---
-
-## Benchmark Results (2026-03-17)
-
-| API | Safe QPS | P50 @ 10 QPS | P50 @ 20 QPS | P50 @ 50 QPS | Notes |
-|-----|----------|-------------|-------------|-------------|-------|
-| **Octen** | **>=50** | 70ms | 69ms | 64ms | Latency improves at higher QPS |
-| **Perplexity** | **~50** | 576ms | 554ms | 512ms | Stable under high load |
-| **Tavily** | **~20** | 168ms | 166ms | 371ms ❌ | Rate limited above 20 QPS |
-| **Brave** | **~15** | 522ms | 511ms | 539ms ❌ | Rate limited above 20 QPS |
-| **Exa** | **~5** | 452ms | 448ms ❌ | 430ms ❌ | Heavily rate limited above 10 QPS |
