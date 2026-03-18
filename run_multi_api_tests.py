@@ -13,11 +13,12 @@ Results saved to: results/{api}_qps{qps}.jsonl
 
 import os
 import sys
+import csv
 import time
 import asyncio
 import signal
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict
 
 from enhanced_api_client import EnhancedAPIClient, API_CONFIGS
 
@@ -26,22 +27,26 @@ from enhanced_api_client import EnhancedAPIClient, API_CONFIGS
 DEFAULT_APIS = ["exa", "tavily", "brave", "perplexity", "octen"]
 DEFAULT_QPS_LEVELS = [1, 5, 10, 15, 20, 50]
 QUERIES_FILE = "queries_10k.txt"
+CSV_QUERIES_FILE = "sealqa_seal_hard.csv"
 RESULTS_DIR = "results"
 
 
 class TestOrchestrator:
     """Orchestrates multi-API performance testing."""
 
-    def __init__(self, queries: List[str], results_dir: str):
+    def __init__(self, queries: List[str], results_dir: str, serial: bool = False):
         """
         Initialize test orchestrator.
 
         Args:
             queries: List of query strings
             results_dir: Directory for output files
+            serial: If True, run with max_concurrency=1 (serial execution)
         """
         self.queries = queries
         self.results_dir = Path(results_dir)
+        self.serial = serial
+        self.max_concurrency = 1 if serial else None
         self.results_dir.mkdir(parents=True, exist_ok=True)
 
         # Track completed tests for graceful interruption
@@ -103,6 +108,113 @@ class TestOrchestrator:
             query_count = min(query_count, len(self.queries))
             return self.queries[:query_count]
 
+    async def test_api_serial(self, api_name: str) -> Dict[str, any]:
+        """
+        Test a single API in serial mode: send all queries one by one with no rate limiting.
+
+        Returns test metadata dict.
+        """
+        output_file = str(self.results_dir / f"{api_name}_serial.jsonl")
+        test_queries = self.queries
+
+        print("\n" + "=" * 80)
+        print(f"Testing {api_name.upper()} (serial mode)")
+        print("=" * 80)
+        print(f"Queries: {len(test_queries)}")
+        print(f"Concurrency: 1 (no rate limiting)")
+        print(f"Output: {output_file}")
+
+        # Check if test already completed
+        if Path(output_file).exists():
+            with open(output_file, 'r') as f:
+                existing_count = sum(1 for _ in f)
+            if existing_count == len(test_queries):
+                print(f"⚠️  Test already completed ({existing_count} queries). Skipping...")
+                return {
+                    "api": api_name,
+                    "mode": "serial",
+                    "query_count": len(test_queries),
+                    "status": "skipped",
+                    "reason": "already_completed",
+                    "output_file": output_file
+                }
+
+        # Create client with a very high QPS so the rate limiter is effectively a no-op
+        try:
+            client = EnhancedAPIClient(api_name, qps=9999)
+        except ValueError as e:
+            print(f"❌ Failed to initialize {api_name}: {e}")
+            return {
+                "api": api_name,
+                "mode": "serial",
+                "status": "failed",
+                "reason": str(e),
+                "output_file": output_file
+            }
+
+        # Progress tracking
+        start_time = time.time()
+
+        def progress_callback(completed, total):
+            if completed % 50 == 0 or completed == total:
+                elapsed = time.time() - start_time
+                pct = completed / total * 100
+                avg_latency = elapsed / completed * 1000 if completed > 0 else 0
+                print(f"  Progress: {completed:,}/{total:,} ({pct:.1f}%) | "
+                      f"Avg latency: {avg_latency:.0f}ms")
+
+        try:
+            await client.run_batch(test_queries, output_file, progress_callback,
+                                   max_concurrency=1)
+
+            duration = time.time() - start_time
+
+            # Calculate P50/P90/P99 from the output file
+            import json as _json
+            latencies = []
+            with open(output_file, 'r') as f:
+                for line in f:
+                    rec = _json.loads(line)
+                    if rec.get("status") == 200 and rec.get("total_time"):
+                        latencies.append(rec["total_time"] * 1000)  # convert to ms
+
+            def _pct(values, p):
+                if not values:
+                    return 0
+                s = sorted(values)
+                k = (len(s) - 1) * p / 100
+                lo, hi = int(k), min(int(k) + 1, len(s) - 1)
+                return s[lo] + (s[hi] - s[lo]) * (k - lo)
+
+            p50 = _pct(latencies, 50)
+            p90 = _pct(latencies, 90)
+            p99 = _pct(latencies, 99)
+
+            print(f"\n✅ Completed {api_name} (serial)")
+            print(f"   Duration: {duration:.0f} seconds ({duration / 60:.1f} minutes)")
+            print(f"   Queries: {len(test_queries)} total, {len(latencies)} successful")
+            print(f"   P50: {p50:.0f}ms | P90: {p90:.0f}ms | P99: {p99:.0f}ms")
+
+            return {
+                "api": api_name,
+                "mode": "serial",
+                "query_count": len(test_queries),
+                "status": "completed",
+                "duration": duration,
+                "output_file": output_file
+            }
+
+        except Exception as e:
+            print(f"❌ Error running {api_name} (serial): {e}")
+            return {
+                "api": api_name,
+                "mode": "serial",
+                "query_count": len(test_queries),
+                "status": "failed",
+                "reason": str(e),
+                "output_file": output_file
+            }
+
     async def test_api_at_qps(
         self,
         api_name: str,
@@ -113,7 +225,6 @@ class TestOrchestrator:
 
         Returns test metadata dict.
         """
-        # Get queries for this QPS level (query_count = qps × 200)
         test_queries = self.get_queries_for_qps(qps)
         output_file = self.get_output_file(api_name, qps)
 
@@ -175,7 +286,8 @@ class TestOrchestrator:
 
         # Run batch with queries for this QPS level
         try:
-            await client.run_batch(test_queries, output_file, progress_callback)
+            await client.run_batch(test_queries, output_file, progress_callback,
+                                   max_concurrency=self.max_concurrency)
 
             end_time = time.time()
             duration = end_time - start_time
@@ -210,10 +322,49 @@ class TestOrchestrator:
         qps_levels: List[float]
     ) -> None:
         """
-        Run all test combinations (APIs × QPS levels).
+        Run all test combinations (APIs × QPS levels), or serial tests if self.serial is set.
 
         Tests run sequentially to avoid interference.
         """
+        if self.serial:
+            await self._run_serial_tests(apis)
+        else:
+            await self._run_qps_tests(apis, qps_levels)
+
+        self.print_summary()
+
+    async def _run_serial_tests(self, apis: List[str]) -> None:
+        """Run serial latency tests for each API (no QPS control)."""
+        print("\n" + "=" * 80)
+        print("SERIAL LATENCY TEST")
+        print("=" * 80)
+        print(f"APIs: {', '.join(apis)}")
+        print(f"Queries: {len(self.queries)} (from CSV, single concurrency)")
+        print(f"Results directory: {self.results_dir}")
+        print("=" * 80)
+
+        for i, api in enumerate(apis):
+            if self.interrupted:
+                print("\n⚠️  Test suite interrupted. Stopping...")
+                break
+
+            # Check if API key is available
+            config = API_CONFIGS.get(api)
+            if config:
+                api_key = os.getenv(config["env_key"], "").strip()
+                if not api_key:
+                    print(f"\n⚠️  Skipping {api}: Missing API key ({config['env_key']})")
+                    continue
+
+            result = await self.test_api_serial(api)
+            self.completed_tests.append(result)
+
+            if not self.interrupted and i < len(apis) - 1:
+                print("  Pausing 5 seconds before next test...")
+                await asyncio.sleep(5)
+
+    async def _run_qps_tests(self, apis: List[str], qps_levels: List[float]) -> None:
+        """Run QPS-based load tests for all API × QPS combinations."""
         total_tests = len(apis) * len(qps_levels)
         completed = 0
 
@@ -231,22 +382,18 @@ class TestOrchestrator:
         print(f"Total queries available: {len(self.queries):,}")
         print(f"Results directory: {self.results_dir}")
 
-        # Calculate total estimated time
         total_duration = 0
         for qps in qps_levels:
             query_count = min(int(qps * 120), len(self.queries))
-            duration_per_api = query_count / qps
-            total_duration += duration_per_api * len(apis)
+            total_duration += (query_count / qps) * len(apis)
         print(f"Estimated total time: {total_duration / 60:.1f} minutes ({total_duration / 3600:.1f} hours)")
         print("=" * 80)
 
-        # Run tests sequentially
         for api in apis:
             if self.interrupted:
                 print("\n⚠️  Test suite interrupted. Stopping...")
                 break
 
-            # Check if API key is available
             config = API_CONFIGS.get(api)
             if config:
                 api_key = os.getenv(config["env_key"], "").strip()
@@ -260,20 +407,15 @@ class TestOrchestrator:
                     print("\n⚠️  Test suite interrupted. Stopping...")
                     break
 
-                # Run test
                 result = await self.test_api_at_qps(api, qps)
                 self.completed_tests.append(result)
                 completed += 1
 
                 print(f"\nOverall progress: {completed}/{total_tests} tests completed")
 
-                # Brief pause between tests
                 if not self.interrupted and completed < total_tests:
                     print("  Pausing 5 seconds before next test...")
                     await asyncio.sleep(5)
-
-        # Print summary
-        self.print_summary()
 
     def print_summary(self):
         """Print summary of all completed tests."""
@@ -295,19 +437,22 @@ class TestOrchestrator:
             for test in successful:
                 duration_min = test.get("duration", 0) / 60
                 query_count = test.get("query_count", 0)
-                print(f"  • {test['api']} @ {test['qps']} QPS ({query_count} queries, {duration_min:.1f}m)")
+                label = "serial" if test.get("mode") == "serial" else f"{test.get('qps')} QPS"
+                print(f"  • {test['api']} @ {label} ({query_count} queries, {duration_min:.1f}m)")
 
         if failed:
             print("\nFailed tests:")
             for test in failed:
                 reason = test.get("reason", "Unknown")
-                print(f"  • {test['api']} @ {test['qps']} QPS - {reason}")
+                label = "serial" if test.get("mode") == "serial" else f"{test.get('qps')} QPS"
+                print(f"  • {test['api']} @ {label} - {reason}")
 
         if skipped:
             print("\nSkipped tests:")
             for test in skipped:
                 reason = test.get("reason", "Unknown")
-                print(f"  • {test['api']} @ {test['qps']} QPS - {reason}")
+                label = "serial" if test.get("mode") == "serial" else f"{test.get('qps')} QPS"
+                print(f"  • {test['api']} @ {label} - {reason}")
 
         print("=" * 80)
         print("\nNext steps:")
@@ -327,6 +472,24 @@ def load_queries(queries_file: str) -> List[str]:
         queries = [line.strip() for line in f if line.strip()]
 
     print(f"Loaded {len(queries):,} queries from {queries_file}")
+    return queries
+
+
+def load_queries_from_csv(csv_file: str, column: str = "Query") -> List[str]:
+    """Load queries from a CSV file (reads the specified column)."""
+    csv_path = Path(csv_file)
+
+    if not csv_path.exists():
+        raise FileNotFoundError(f"CSV file not found: {csv_file}")
+
+    queries = []
+    with open(csv_path, 'r', encoding='utf-8-sig') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if column in row and row[column].strip():
+                queries.append(row[column].strip())
+
+    print(f"Loaded {len(queries):,} queries from {csv_file} (column: '{column}')")
     return queries
 
 
@@ -366,18 +529,32 @@ def main():
         type=int,
         help="Limit number of queries (for testing)"
     )
+    parser.add_argument(
+        "--serial",
+        action="store_true",
+        help=(
+            "Serial latency test mode: single concurrency, reads queries directly from "
+            f"{CSV_QUERIES_FILE} (no need to generate queries_10k.txt). "
+            "Useful for measuring baseline latency per API."
+        )
+    )
 
     args = parser.parse_args()
 
-    # Load queries
-    queries = load_queries(args.queries)
+    # --serial mode: load directly from CSV, no QPS control
+    if args.serial:
+        csv_file = args.queries if args.queries != QUERIES_FILE else CSV_QUERIES_FILE
+        queries = load_queries_from_csv(csv_file)
+        print(f"Serial mode: single concurrency, no rate limiting, queries from {csv_file}")
+    else:
+        queries = load_queries(args.queries)
 
     if args.limit:
         queries = queries[:args.limit]
         print(f"Limited to first {args.limit} queries")
 
     # Create orchestrator
-    orchestrator = TestOrchestrator(queries, args.results_dir)
+    orchestrator = TestOrchestrator(queries, args.results_dir, serial=args.serial)
 
     # Run all tests
     asyncio.run(orchestrator.run_all_tests(args.apis, args.qps_levels))

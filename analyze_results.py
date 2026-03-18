@@ -165,23 +165,30 @@ def load_all_results(results_dir: str) -> Dict[str, Dict[str, Any]]:
 
     # Analyze each file
     for file_path in jsonl_files:
-        # Parse filename: {api}_qps{qps}.jsonl
         filename = file_path.stem  # Remove .jsonl
-        parts = filename.split('_qps')
 
-        if len(parts) != 2:
+        # Parse filename: {api}_serial.jsonl or {api}_qps{qps}.jsonl
+        if filename.endswith('_serial'):
+            api = filename[:-7]  # strip '_serial'
+            qps = 'serial'
+        elif '_qps' in filename:
+            parts = filename.split('_qps')
+            if len(parts) != 2:
+                print(f"Skipping {file_path.name}: Invalid filename format")
+                continue
+            api = parts[0]
+            try:
+                qps = int(parts[1])
+            except ValueError:
+                print(f"Skipping {file_path.name}: Invalid QPS value")
+                continue
+        else:
             print(f"Skipping {file_path.name}: Invalid filename format")
             continue
 
-        api = parts[0]
-        try:
-            qps = int(parts[1])
-        except ValueError:
-            print(f"Skipping {file_path.name}: Invalid QPS value")
-            continue
-
         # Analyze
-        print(f"Analyzing {api} @ {qps} QPS...")
+        label = "serial" if qps == "serial" else f"{qps} QPS"
+        print(f"Analyzing {api} @ {label}...")
         analysis = analyze_jsonl(str(file_path))
 
         if analysis:
@@ -213,8 +220,11 @@ def generate_summary_text(all_results: Dict[str, Dict[str, Any]]) -> str:
         lines.append(f"{'QPS':<6} | {'Requests':<9} | {'Success%':<8} | {'P50(ms)':<8} | {'P90(ms)':<8} | {'P99(ms)':<8} | {'Errors by Type':<50}")
         lines.append("-" * 100)
 
-        # Sort by QPS
-        for qps in sorted(all_results[api].keys()):
+        # Sort by QPS (serial sorts last)
+        def qps_sort_key(q):
+            return (1, q) if isinstance(q, int) else (2, q)
+
+        for qps in sorted(all_results[api].keys(), key=qps_sort_key):
             analysis = all_results[api][qps]
 
             # Format error types
@@ -228,8 +238,9 @@ def generate_summary_text(all_results: Dict[str, Dict[str, Any]]) -> str:
             # Get percentiles (use total_time)
             p = analysis['total_time_percentiles']
 
+            qps_label = str(qps)
             lines.append(
-                f"{qps:<6} | {analysis['total_requests']:<9,} | {analysis['success_rate']:<8.2f} | "
+                f"{qps_label:<6} | {analysis['total_requests']:<9,} | {analysis['success_rate']:<8.2f} | "
                 f"{p['p50']:<8.0f} | {p['p90']:<8.0f} | {p['p99']:<8.0f} | "
                 f"{error_types_str[:50]}"
             )
@@ -325,9 +336,12 @@ def generate_latency_csv(all_results: Dict[str, Dict[str, Any]]) -> List[List[st
          "Timeout Errors", "Rate Limit Errors", "Connection Errors", "API Errors"]
     ]
 
+    def qps_sort_key(q):
+        return (1, q) if isinstance(q, int) else (2, q)
+
     # Add rows
     for api in sorted(all_results.keys()):
-        for qps in sorted(all_results[api].keys()):
+        for qps in sorted(all_results[api].keys(), key=qps_sort_key):
             analysis = all_results[api][qps]
             p = analysis['total_time_percentiles']
 

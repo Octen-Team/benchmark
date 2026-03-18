@@ -81,6 +81,23 @@ python3 run_multi_api_tests.py --apis octen perplexity --qps-levels 1 10 50
 python3 run_multi_api_tests.py --apis octen --qps-levels 20
 ```
 
+### Serial latency test (baseline measurement)
+
+Use `--serial` to measure baseline latency. Queries are sent one by one with no rate limiting — each request completes before the next begins. Reads directly from `sealqa_seal_hard.csv`, no need to generate `queries_10k.txt` first. Results are saved to `{api}_serial.jsonl`.
+
+```bash
+# Test all APIs serially (254 queries each)
+python3 run_multi_api_tests.py --serial
+
+# Test specific APIs only
+python3 run_multi_api_tests.py --serial --apis octen tavily
+```
+
+Serial mode is ideal for:
+- Measuring true single-request latency (no concurrency effects)
+- Quick sanity checks before running the full suite
+- Validating API keys and connectivity
+
 ### Analyze results
 
 ```bash
@@ -105,6 +122,7 @@ Generates the following reports:
 | `--queries` | `queries_10k.txt` | Path to query file |
 | `--results-dir` | `results/` | Output directory for results |
 | `--limit` | no limit | Use only the first N queries (for debugging) |
+| `--serial` | off | Serial mode: send all queries one by one with no rate limiting, reads from `sealqa_seal_hard.csv` |
 
 **Examples:**
 ```bash
@@ -113,6 +131,9 @@ python3 run_multi_api_tests.py --apis octen --qps-levels 1 --limit 50
 
 # Test high-QPS scenarios only
 python3 run_multi_api_tests.py --qps-levels 20 50
+
+# Serial latency baseline (single concurrency, reads sealqa_seal_hard.csv)
+python3 run_multi_api_tests.py --serial
 ```
 
 ### `analyze_results.py`
