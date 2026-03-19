@@ -143,9 +143,14 @@ def analyze_jsonl(file_path: str) -> Dict[str, Any]:
     }
 
 
-def load_all_results(results_dir: str) -> Dict[str, Dict[str, Any]]:
+def load_all_results(results_dir: str, mode: Optional[str] = None, qps_filter: Optional[List[int]] = None) -> Dict[str, Dict[str, Any]]:
     """
     Load and analyze all JSONL files in results directory.
+
+    Args:
+        results_dir: Directory containing JSONL result files
+        mode: Filter by result type — "serial", "qps", or None (all)
+        qps_filter: When mode="qps", only include these QPS levels (None = all)
 
     Returns nested dict: {api: {qps: analysis_dict}}
     """
@@ -169,9 +174,13 @@ def load_all_results(results_dir: str) -> Dict[str, Dict[str, Any]]:
 
         # Parse filename: {api}_serial.jsonl or {api}_qps{qps}.jsonl
         if filename.endswith('_serial'):
+            if mode == "qps":
+                continue
             api = filename[:-7]  # strip '_serial'
             qps = 'serial'
         elif '_qps' in filename:
+            if mode == "serial":
+                continue
             parts = filename.split('_qps')
             if len(parts) != 2:
                 print(f"Skipping {file_path.name}: Invalid filename format")
@@ -181,6 +190,8 @@ def load_all_results(results_dir: str) -> Dict[str, Dict[str, Any]]:
                 qps = int(parts[1])
             except ValueError:
                 print(f"Skipping {file_path.name}: Invalid QPS value")
+                continue
+            if qps_filter and qps not in qps_filter:
                 continue
         else:
             print(f"Skipping {file_path.name}: Invalid filename format")
@@ -208,8 +219,11 @@ def generate_summary_text(all_results: Dict[str, Dict[str, Any]]) -> str:
     lines.append("=" * 100)
     lines.append("")
 
+    def api_sort_key(a):
+        return (0, a) if a == "octen" else (1, a)
+
     # Per-API reports
-    for api in sorted(all_results.keys()):
+    for api in sorted(all_results.keys(), key=api_sort_key):
         lines.append("")
         lines.append("=" * 100)
         lines.append(f"API: {api.upper()}")
@@ -303,8 +317,8 @@ def generate_summary_text(all_results: Dict[str, Dict[str, Any]]) -> str:
                     "actual_qps": analysis['actual_qps'],
                 })
 
-        # Sort by success rate (descending)
-        qps_data.sort(key=lambda x: x['success_rate'], reverse=True)
+        # Sort by P50 latency (ascending)
+        qps_data.sort(key=lambda x: x['p50'])
 
         for data in qps_data:
             lines.append(
@@ -315,8 +329,8 @@ def generate_summary_text(all_results: Dict[str, Dict[str, Any]]) -> str:
 
         # Identify best performer
         if qps_data:
-            best_success = qps_data[0]
-            best_latency = min(qps_data, key=lambda x: x['p50'])
+            best_success = max(qps_data, key=lambda x: x['success_rate'])
+            best_latency = qps_data[0]  # already sorted by p50 ascending
             lines.append("")
             lines.append(f"  🏆 Best Success Rate: {best_success['api']} ({best_success['success_rate']:.2f}%)")
             lines.append(f"  ⚡ Best Latency (P50): {best_latency['api']} ({best_latency['p50']:.0f}ms)")
@@ -339,8 +353,11 @@ def generate_latency_csv(all_results: Dict[str, Dict[str, Any]]) -> List[List[st
     def qps_sort_key(q):
         return (1, q) if isinstance(q, int) else (2, q)
 
+    def api_sort_key(a):
+        return (0, a) if a == "octen" else (1, a)
+
     # Add rows
-    for api in sorted(all_results.keys()):
+    for api in sorted(all_results.keys(), key=api_sort_key):
         for qps in sorted(all_results[api].keys(), key=qps_sort_key):
             analysis = all_results[api][qps]
             p = analysis['total_time_percentiles']
@@ -425,6 +442,19 @@ def main():
         default=RESULTS_DIR,
         help=f"Results directory (default: {RESULTS_DIR})"
     )
+    parser.add_argument(
+        "--mode",
+        choices=["serial", "qps"],
+        default=None,
+        help="Filter result type: 'serial' for serial tests, 'qps' for QPS load tests (default: all)"
+    )
+    parser.add_argument(
+        "--qps",
+        nargs="+",
+        type=int,
+        default=None,
+        help="When --mode qps: only analyze these QPS levels, e.g. --qps 1 10 50"
+    )
 
     args = parser.parse_args()
 
@@ -433,7 +463,7 @@ def main():
     print("=" * 80)
 
     # Load and analyze all results
-    all_results = load_all_results(args.results_dir)
+    all_results = load_all_results(args.results_dir, mode=args.mode, qps_filter=args.qps)
 
     if not all_results:
         print("\n❌ No results found!")

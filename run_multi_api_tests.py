@@ -46,6 +46,7 @@ class TestOrchestrator:
         self.queries = queries
         self.results_dir = Path(results_dir)
         self.serial = serial
+        self.force = False
         self.max_concurrency = 1 if serial else None
         self.results_dir.mkdir(parents=True, exist_ok=True)
 
@@ -125,7 +126,7 @@ class TestOrchestrator:
         print(f"Output: {output_file}")
 
         # Check if test already completed
-        if Path(output_file).exists():
+        if not self.force and Path(output_file).exists():
             with open(output_file, 'r') as f:
                 existing_count = sum(1 for _ in f)
             if existing_count == len(test_queries):
@@ -237,7 +238,7 @@ class TestOrchestrator:
         print(f"Output: {output_file}")
 
         # Check if test already completed
-        if Path(output_file).exists():
+        if not self.force and Path(output_file).exists():
             with open(output_file, 'r') as f:
                 existing_count = sum(1 for _ in f)
             if existing_count == len(test_queries):
@@ -538,6 +539,11 @@ def main():
             "Useful for measuring baseline latency per API."
         )
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-run tests even if result files already exist (overwrite cached results)"
+    )
 
     args = parser.parse_args()
 
@@ -555,6 +561,7 @@ def main():
 
     # Create orchestrator
     orchestrator = TestOrchestrator(queries, args.results_dir, serial=args.serial)
+    orchestrator.force = args.force
 
     # Run all tests
     asyncio.run(orchestrator.run_all_tests(args.apis, args.qps_levels))

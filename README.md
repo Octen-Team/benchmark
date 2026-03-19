@@ -123,6 +123,7 @@ Generates the following reports:
 | `--results-dir` | `results/` | Output directory for results |
 | `--limit` | no limit | Use only the first N queries (for debugging) |
 | `--serial` | off | Serial mode: send all queries one by one with no rate limiting, reads from `sealqa_seal_hard.csv` |
+| `--force` | off | Re-run tests even if result files already exist (overwrite cached results) |
 
 **Examples:**
 ```bash
@@ -141,6 +142,20 @@ python3 run_multi_api_tests.py --serial
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--results-dir` | `results/` | Directory containing JSONL result files |
+| `--mode` | all | Filter result type: `serial` or `qps` |
+| `--qps` | all | When `--mode qps`: only analyze these QPS levels (space-separated) |
+
+**Examples:**
+```bash
+# Analyze only serial results
+python3 analyze_results.py --mode serial
+
+# Analyze only QPS results
+python3 analyze_results.py --mode qps
+
+# Analyze specific QPS levels only
+python3 analyze_results.py --mode qps --qps 1 10 50
+```
 
 ---
 
